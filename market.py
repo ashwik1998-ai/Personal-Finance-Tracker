@@ -194,14 +194,19 @@ def render_market_intelligence():
         if holdings_df.empty:
             st.info("Add holdings to your portfolio to see relevant news here.")
         else:
-            port_syms = holdings_df["symbol"].unique().tolist()
-            name_map  = api.get_company_names(tuple(port_syms))
+            # Filter out MF and ETF, only fetch news for purely STOCK assets
+            stock_only_df = holdings_df[holdings_df['asset_type'] == 'STOCK']
+            if stock_only_df.empty:
+                st.info("Add stock holdings to your portfolio to see relevant news here.")
+            else:
+                port_syms = stock_only_df["symbol"].unique().tolist()
+                name_map  = api.get_company_names(tuple(port_syms))
 
-            # Portfolio stock filter (ALL + individual)
-            sym_options = ["🌐 ALL"] + port_syms
-            pf_filter = st.selectbox(
-                "Filter by Stock", sym_options, key="port_stock_filter"
-            )
+                # Portfolio stock filter (ALL + individual)
+                sym_options = ["🌐 ALL"] + port_syms
+                pf_filter = st.selectbox(
+                    "Filter by Stock", sym_options, key="port_stock_filter"
+                )
 
             if pf_filter == "🌐 ALL":
                 filtered = port_syms

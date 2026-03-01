@@ -366,9 +366,9 @@ def render_add_holding_form():
         with st.form("add_holding_details_form", clear_on_submit=True):
             col1, col2 = st.columns(2)
             with col1:
-                avg_price = st.number_input("Average Buy Price (₹)", min_value=0.0, format="%.2f", step=0.01)
+                avg_price = st.number_input("Average Buy Price (₹)", min_value=0.0, value=1.0, format="%.2f", step=0.01)
             with col2:
-                quantity = st.number_input("Quantity", min_value=0.0001, format="%.4f", step=0.0001)
+                quantity = st.number_input("Quantity", min_value=0.0001, value=1.0, format="%.4f", step=0.0001)
             
             purchase_date = st.date_input("Purchase Date", value=datetime.now())
             
