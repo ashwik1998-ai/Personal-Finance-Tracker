@@ -19,16 +19,28 @@ def _batch_fetch_prices(symbols: tuple) -> dict:
         return {}
     try:
         data = yf.download(list(symbols), period="1d", progress=False, threads=True)
-        closes = data["Close"] if "Close" in data.columns else data
+        if data.empty:
+            return {s: 0.0 for s in symbols}
+
+        # yfinance returns MultiIndex columns when given a list:
+        # ('Close', 'HDFCBANK.NS') — extract Close level safely
+        try:
+            closes = data["Close"]
+        except KeyError:
+            return {s: 0.0 for s in symbols}
+
+        # If only 1 symbol, result is a Series not a DataFrame
         if isinstance(closes, pd.Series):
-            # single symbol comes back as a Series
             sym = symbols[0]
-            val = float(closes.iloc[-1]) if not closes.empty else 0.0
+            val = float(closes.dropna().iloc[-1]) if not closes.dropna().empty else 0.0
             return {sym: val}
+
+        # Multiple symbols → DataFrame with symbol columns
         result = {}
         for sym in symbols:
             try:
-                result[sym] = float(closes[sym].dropna().iloc[-1])
+                col = closes[sym].dropna()
+                result[sym] = float(col.iloc[-1]) if not col.empty else 0.0
             except Exception:
                 result[sym] = 0.0
         return result
@@ -40,25 +52,26 @@ def _batch_fetch_prices(symbols: tuple) -> dict:
 @st.cache_data(ttl=120)
 def fetch_watchlist_prices(symbols: tuple) -> list[dict]:
     """Batch-fetch live price + day-change for watchlist symbols (one yfinance call)."""
+    fallback = [{"symbol": s, "name": s, "price": None, "chg": None, "chg_pct": None} for s in symbols]
     if not symbols:
         return []
     try:
         data = yf.download(list(symbols), period="2d", progress=False, threads=True)
-        closes = data["Close"] if "Close" in data.columns else data
+        if data.empty:
+            return fallback
+        try:
+            closes = data["Close"]
+        except KeyError:
+            return fallback
 
-        # Resolve display names in batch
         name_map = _get_names_fast(symbols)
-
         results = []
         for sym in symbols:
             try:
-                if isinstance(closes, pd.Series):
-                    series = closes
-                else:
-                    series = closes[sym].dropna()
+                series = closes if isinstance(closes, pd.Series) else closes[sym]
+                series = series.dropna()
                 if len(series) >= 2:
-                    prev  = float(series.iloc[-2])
-                    price = float(series.iloc[-1])
+                    prev, price = float(series.iloc[-2]), float(series.iloc[-1])
                     chg   = price - prev
                     chg_p = (chg / prev * 100) if prev else 0.0
                 elif len(series) == 1:
@@ -68,18 +81,13 @@ def fetch_watchlist_prices(symbols: tuple) -> list[dict]:
                     price, chg, chg_p = None, None, None
             except Exception:
                 price, chg, chg_p = None, None, None
-
-            results.append({
-                "symbol": sym,
-                "name":   name_map.get(sym, sym),
-                "price":  price,
-                "chg":    chg,
-                "chg_pct": chg_p,
-            })
+            results.append({"symbol": sym, "name": name_map.get(sym, sym),
+                             "price": price, "chg": chg, "chg_pct": chg_p})
         return results
     except Exception as e:
         print(f"Watchlist price fetch error: {e}")
-        return [{"symbol": s, "name": s, "price": None, "chg": None, "chg_pct": None} for s in symbols]
+        return fallback
+
 
 
 # ── Company name resolution ────────────────────────────────────────────────────
@@ -167,11 +175,47 @@ def get_portfolio_metrics(holdings_df: pd.DataFrame):
 
 @st.cache_data(ttl=3600)
 def fetch_historical_data(symbol: str, period: str = "1mo") -> pd.Series:
+    """Single symbol historical close — uses ticker.history() to avoid MultiIndex issues."""
     try:
-        df = yf.download(symbol, period=period, progress=False)
-        return df["Close"].squeeze() if not df.empty else pd.Series()
+        hist = yf.Ticker(symbol).history(period=period)
+        return hist["Close"] if not hist.empty else pd.Series()
     except Exception:
         return pd.Series()
+
+
+@st.cache_data(ttl=3600)
+def fetch_portfolio_trend(symbols_qty: tuple) -> "pd.Series":
+    """
+    Batch-fetch 1M history for all portfolio symbols in ONE call.
+    symbols_qty: tuple of (symbol, quantity) pairs
+    Returns a daily total portfolio value Series.
+    """
+    if not symbols_qty:
+        return pd.Series(dtype=float)
+    symbols = [s for s, _ in symbols_qty]
+    qty_map = {s: q for s, q in symbols_qty}
+    try:
+        data = yf.download(symbols, period="1mo", progress=False, threads=True)
+        try:
+            closes = data["Close"]
+        except KeyError:
+            return pd.Series(dtype=float)
+
+        if isinstance(closes, pd.Series):
+            # Single symbol
+            return (closes.dropna() * qty_map[symbols[0]]).rename("Value")
+
+        total = None
+        for sym in symbols:
+            try:
+                series = closes[sym].dropna() * qty_map.get(sym, 1)
+                total = series if total is None else total.add(series, fill_value=0)
+            except Exception:
+                continue
+        return total if total is not None else pd.Series(dtype=float)
+    except Exception as e:
+        print(f"Portfolio trend fetch error: {e}")
+        return pd.Series(dtype=float)
 
 
 # ── MF NAV ────────────────────────────────────────────────────────────────────
@@ -187,6 +231,17 @@ def fetch_mf_nav(amfi_code) -> float:
     except Exception:
         pass
     return 0.0
+
+@st.cache_data(ttl=86400)
+def get_mf_name(amfi_code) -> str:
+    """Fetch the name of a Mutual Fund using its AMFI code."""
+    try:
+        r = requests.get(f"https://api.mfapi.in/mf/{amfi_code}", timeout=8)
+        if r.status_code == 200:
+            return r.json().get("meta", {}).get("scheme_name", str(amfi_code))
+    except Exception:
+        pass
+    return str(amfi_code)
 
 
 def search_mf(query: str) -> list:

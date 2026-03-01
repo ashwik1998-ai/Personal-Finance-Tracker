@@ -215,25 +215,28 @@ def render_portfolio_dashboard():
         if not enriched_df.empty:
             st.subheader("📈 Portfolio Value Trend (1M)")
             with st.spinner("Calculating trend..."):
-                hist_series_list = []
-                for _, row in enriched_df.iterrows():
-                    if row['asset_type'] in ['STOCK', 'ETF']:
-                        hist = api.fetch_historical_data(row['symbol'])
-                        if not hist.empty:
-                            hist_series_list.append(hist * row['quantity'])
-
-                if hist_series_list:
-                    trend_df = pd.concat(hist_series_list, axis=1).sum(axis=1).reset_index()
-                    trend_df.columns = ['Date', 'Value']
-                    fig_trend = px.line(trend_df, x='Date', y='Value', color_discrete_sequence=['#38bdf8'])
-                    fig_trend.update_layout(
-                        margin={"t": 30, "b": 0, "l": 0, "r": 0},
-                        paper_bgcolor="rgba(0,0,0,0)",
-                        plot_bgcolor="rgba(0,0,0,0)",
-                        font={"color": "#94a3b8"},
-                        xaxis_title="", yaxis_title="Value (₹)", showlegend=False
+                stock_etf = enriched_df[enriched_df["asset_type"].isin(["STOCK", "ETF"])]
+                if not stock_etf.empty:
+                    symbols_qty = tuple(
+                        (row["symbol"], float(row["quantity"]))
+                        for _, row in stock_etf.iterrows()
                     )
-                    st.plotly_chart(fig_trend, use_container_width=True)
+                    trend = api.fetch_portfolio_trend(symbols_qty)
+                    if trend is not None and not trend.empty:
+                        trend_df = trend.reset_index()
+                        trend_df.columns = ["Date", "Value"]
+                        fig_trend = px.line(trend_df, x="Date", y="Value",
+                                            color_discrete_sequence=["#38bdf8"])
+                        fig_trend.update_layout(
+                            margin={"t": 30, "b": 0, "l": 0, "r": 0},
+                            paper_bgcolor="rgba(0,0,0,0)",
+                            plot_bgcolor="rgba(0,0,0,0)",
+                            font={"color": "#94a3b8"},
+                            xaxis_title="", yaxis_title="Value (₹)", showlegend=False
+                        )
+                        st.plotly_chart(fig_trend, use_container_width=True)
+                    else:
+                        st.info("Trend data unavailable for current assets.")
                 else:
                     st.info("Trend data unavailable for current assets.")
 
@@ -295,7 +298,13 @@ def render_portfolio_dashboard():
             st.subheader("Your Holdings")
             if 'id' in enriched_df.columns:
                 display_df = enriched_df[['id', 'symbol', 'asset_type', 'avg_price', 'quantity',
-                                          'current_price', 'current_value', 'unrealized_pl', 'unrealized_pl_pct']]
+                                          'current_price', 'current_value', 'unrealized_pl', 'unrealized_pl_pct']].copy()
+                
+                # Replace AMFI code with MF Name
+                mf_mask = display_df['asset_type'] == 'MF'
+                if mf_mask.any():
+                    display_df.loc[mf_mask, 'symbol'] = display_df.loc[mf_mask, 'symbol'].apply(api.get_mf_name)
+
                 display_df.columns = ['ID', 'Symbol', 'Type', 'Avg Price', 'Qty', 'LTP/NAV',
                                        'Current Value', 'P&L', 'P&L %']
                 st.dataframe(
