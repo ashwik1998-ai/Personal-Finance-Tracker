@@ -14,42 +14,67 @@ def fetch_stock_price(symbol: str) -> float:
 
 @st.cache_data(ttl=300)
 def _batch_fetch_prices(symbols: tuple) -> dict:
-    """Batch-download latest close prices for many symbols in one yfinance call."""
+    """Batch-download latest close prices for many symbols in one yfinance call.
+    Falls back to per-symbol Ticker.history() if batch returns 0.0 for any symbol."""
     if not symbols:
         return {}
-    try:
-        # Deduplicate: yfinance returns unexpected formats with duplicate tickers
-        unique_syms = list(dict.fromkeys(symbols))
-        # Use 5d to avoid empty data on weekends due to server timezone differences
-        data = yf.download(unique_syms, period="5d", progress=False, threads=True)
-        if data.empty:
-            return {s: 0.0 for s in symbols}
 
-        # yfinance returns MultiIndex columns when given a list:
-        # ('Close', 'HDFCBANK.NS') — extract Close level safely
+    # Deduplicate: yfinance returns unexpected formats with duplicate tickers
+    unique_syms = list(dict.fromkeys(symbols))
+
+    def _ticker_fallback(sym: str) -> float:
+        """Per-symbol fallback using Ticker.history() — works without threading."""
+        try:
+            hist = yf.Ticker(sym).history(period="5d")
+            if not hist.empty and "Close" in hist.columns:
+                val = hist["Close"].dropna()
+                return float(val.iloc[-1]) if not val.empty else 0.0
+        except Exception:
+            pass
+        return 0.0
+
+    try:
+        # Use threads=False for Linux server compatibility (Render/Docker)
+        data = yf.download(unique_syms, period="5d", progress=False, threads=False)
+        if data.empty:
+            # Full fallback to individual fetches
+            price_lookup = {sym: _ticker_fallback(sym) for sym in unique_syms}
+            return {s: price_lookup.get(s, 0.0) for s in symbols}
+
         try:
             closes = data["Close"]
         except KeyError:
-            return {s: 0.0 for s in symbols}
+            price_lookup = {sym: _ticker_fallback(sym) for sym in unique_syms}
+            return {s: price_lookup.get(s, 0.0) for s in symbols}
 
-        # If only 1 unique symbol, result is a Series not a DataFrame
+        # If only 1 unique symbol, result may be a Series not a DataFrame
         if isinstance(closes, pd.Series):
             sym = unique_syms[0]
             val = float(closes.dropna().iloc[-1]) if not closes.dropna().empty else 0.0
-            return {s: val for s in symbols}  # fill all (including duplicates)
+            if val == 0.0:
+                val = _ticker_fallback(sym)
+            return {s: val for s in symbols}
 
         # Multiple symbols → DataFrame with symbol columns
         price_lookup = {}
         for sym in unique_syms:
             try:
                 col = closes[sym].dropna()
-                price_lookup[sym] = float(col.iloc[-1]) if not col.empty else 0.0
+                price = float(col.iloc[-1]) if not col.empty else 0.0
             except Exception:
-                price_lookup[sym] = 0.0
+                price = 0.0
+            # If still 0, try individual fallback
+            if price == 0.0:
+                price = _ticker_fallback(sym)
+            price_lookup[sym] = price
         return {s: price_lookup.get(s, 0.0) for s in symbols}
+
     except Exception as e:
         print(f"Batch price fetch error: {e}")
-        return {s: 0.0 for s in symbols}
+        # Full fallback
+        price_lookup = {sym: _ticker_fallback(sym) for sym in unique_syms}
+        return {s: price_lookup.get(s, 0.0) for s in symbols}
+
 
 
 @st.cache_data(ttl=120)
