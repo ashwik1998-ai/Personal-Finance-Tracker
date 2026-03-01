@@ -18,8 +18,10 @@ def _batch_fetch_prices(symbols: tuple) -> dict:
     if not symbols:
         return {}
     try:
+        # Deduplicate: yfinance returns unexpected formats with duplicate tickers
+        unique_syms = list(dict.fromkeys(symbols))
         # Use 5d to avoid empty data on weekends due to server timezone differences
-        data = yf.download(list(symbols), period="5d", progress=False, threads=True)
+        data = yf.download(unique_syms, period="5d", progress=False, threads=True)
         if data.empty:
             return {s: 0.0 for s in symbols}
 
@@ -30,21 +32,21 @@ def _batch_fetch_prices(symbols: tuple) -> dict:
         except KeyError:
             return {s: 0.0 for s in symbols}
 
-        # If only 1 symbol, result is a Series not a DataFrame
+        # If only 1 unique symbol, result is a Series not a DataFrame
         if isinstance(closes, pd.Series):
-            sym = symbols[0]
+            sym = unique_syms[0]
             val = float(closes.dropna().iloc[-1]) if not closes.dropna().empty else 0.0
-            return {sym: val}
+            return {s: val for s in symbols}  # fill all (including duplicates)
 
         # Multiple symbols → DataFrame with symbol columns
-        result = {}
-        for sym in symbols:
+        price_lookup = {}
+        for sym in unique_syms:
             try:
                 col = closes[sym].dropna()
-                result[sym] = float(col.iloc[-1]) if not col.empty else 0.0
+                price_lookup[sym] = float(col.iloc[-1]) if not col.empty else 0.0
             except Exception:
-                result[sym] = 0.0
-        return result
+                price_lookup[sym] = 0.0
+        return {s: price_lookup.get(s, 0.0) for s in symbols}
     except Exception as e:
         print(f"Batch price fetch error: {e}")
         return {s: 0.0 for s in symbols}
@@ -185,32 +187,38 @@ def fetch_historical_data(symbol: str, period: str = "1mo") -> pd.Series:
         return pd.Series()
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=600)
 def fetch_portfolio_trend(symbols_qty: tuple) -> "pd.Series":
     """
     Batch-fetch 1M history for all portfolio symbols in ONE call.
     symbols_qty: tuple of (symbol, quantity) pairs
     Returns a daily total portfolio value Series.
+    Handles duplicate symbols by summing their quantities.
     """
     if not symbols_qty:
         return pd.Series(dtype=float)
-    symbols = [s for s, _ in symbols_qty]
-    qty_map = {s: q for s, q in symbols_qty}
+
+    # Aggregate quantities for duplicate symbols
+    qty_map: dict = {}
+    for s, q in symbols_qty:
+        qty_map[s] = qty_map.get(s, 0) + q
+    unique_symbols = list(qty_map.keys())
+
     try:
-        data = yf.download(symbols, period="1mo", progress=False, threads=True)
+        data = yf.download(unique_symbols, period="1mo", progress=False, threads=True)
         try:
             closes = data["Close"]
         except KeyError:
             return pd.Series(dtype=float)
 
         if isinstance(closes, pd.Series):
-            # Fallback if yfinance behaves unexpectedly
-            sym = symbols[0]
+            # Single symbol returned as Series
+            sym = unique_symbols[0]
             qty = qty_map.get(sym, 1)
             return (closes.dropna() * qty).rename("Value")
 
         total = None
-        for sym in symbols:
+        for sym in unique_symbols:
             if sym in closes.columns:
                 try:
                     series = closes[sym].dropna() * qty_map.get(sym, 1)
