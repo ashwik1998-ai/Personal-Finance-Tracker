@@ -18,7 +18,8 @@ def _batch_fetch_prices(symbols: tuple) -> dict:
     if not symbols:
         return {}
     try:
-        data = yf.download(list(symbols), period="1d", progress=False, threads=True)
+        # Use 5d to avoid empty data on weekends due to server timezone differences
+        data = yf.download(list(symbols), period="5d", progress=False, threads=True)
         if data.empty:
             return {s: 0.0 for s in symbols}
 
@@ -56,7 +57,8 @@ def fetch_watchlist_prices(symbols: tuple) -> list[dict]:
     if not symbols:
         return []
     try:
-        data = yf.download(list(symbols), period="2d", progress=False, threads=True)
+        # Use 5d to ensure we have at least 2 trading days to calculate daily change, even on weekends
+        data = yf.download(list(symbols), period="5d", progress=False, threads=True)
         if data.empty:
             return fallback
         try:
