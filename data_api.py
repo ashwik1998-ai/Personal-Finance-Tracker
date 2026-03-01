@@ -204,16 +204,19 @@ def fetch_portfolio_trend(symbols_qty: tuple) -> "pd.Series":
             return pd.Series(dtype=float)
 
         if isinstance(closes, pd.Series):
-            # Single symbol
-            return (closes.dropna() * qty_map[symbols[0]]).rename("Value")
+            # Fallback if yfinance behaves unexpectedly
+            sym = symbols[0]
+            qty = qty_map.get(sym, 1)
+            return (closes.dropna() * qty).rename("Value")
 
         total = None
         for sym in symbols:
-            try:
-                series = closes[sym].dropna() * qty_map.get(sym, 1)
-                total = series if total is None else total.add(series, fill_value=0)
-            except Exception:
-                continue
+            if sym in closes.columns:
+                try:
+                    series = closes[sym].dropna() * qty_map.get(sym, 1)
+                    total = series if total is None else total.add(series, fill_value=0)
+                except Exception:
+                    continue
         return total if total is not None else pd.Series(dtype=float)
     except Exception as e:
         print(f"Portfolio trend fetch error: {e}")

@@ -200,6 +200,12 @@ def render_portfolio_dashboard():
 
         total_inv, curr_val, total_pl, total_pl_pct, enriched_df = api.get_portfolio_metrics(holdings_df)
 
+        # Replace AMFI code with MF Name globally for charts and tables
+        if not enriched_df.empty:
+            mf_mask = enriched_df['asset_type'] == 'MF'
+            if mf_mask.any():
+                enriched_df.loc[mf_mask, 'symbol'] = enriched_df.loc[mf_mask, 'symbol'].apply(api.get_mf_name)
+
         # Asset Quick Links
         if not enriched_df.empty:
             st.markdown("### 🏷️ Your Assets")
@@ -300,10 +306,7 @@ def render_portfolio_dashboard():
                 display_df = enriched_df[['id', 'symbol', 'asset_type', 'avg_price', 'quantity',
                                           'current_price', 'current_value', 'unrealized_pl', 'unrealized_pl_pct']].copy()
                 
-                # Replace AMFI code with MF Name
-                mf_mask = display_df['asset_type'] == 'MF'
-                if mf_mask.any():
-                    display_df.loc[mf_mask, 'symbol'] = display_df.loc[mf_mask, 'symbol'].apply(api.get_mf_name)
+                # AMFI codes are already replaced with MF Names in enriched_df
 
                 display_df.columns = ['ID', 'Symbol', 'Type', 'Avg Price', 'Qty', 'LTP/NAV',
                                        'Current Value', 'P&L', 'P&L %']
