@@ -76,8 +76,10 @@ def add_holding(symbol: str, asset_type: str, avg_price: float,
         "purchase_date": purchase_date,
         "created_at":    datetime.utcnow(),
     })
+    get_all_holdings.clear()  # invalidate cache
 
 
+@st.cache_data(ttl=30)
 def get_all_holdings() -> pd.DataFrame:
     user_id = get_current_user_id()
     if not user_id:
@@ -101,10 +103,12 @@ def delete_holding(holding_id: str):
     if db is None:
         return
     db.holdings.delete_one({"_id": ObjectId(holding_id), "user_id": user_id})
+    get_all_holdings.clear()  # invalidate cache
 
 
 # ── Watchlists ────────────────────────────────────────────────────────────────
 
+@st.cache_data(ttl=30)
 def get_watchlists() -> list[dict]:
     user_id = get_current_user_id()
     if not user_id:
@@ -131,6 +135,7 @@ def create_watchlist(name: str):
         "symbols":    [],
         "created_at": datetime.utcnow(),
     })
+    get_watchlists.clear()  # invalidate cache
 
 
 def update_watchlist_symbols(watchlist_id: str, symbols: list[str]):
@@ -144,6 +149,7 @@ def update_watchlist_symbols(watchlist_id: str, symbols: list[str]):
         {"_id": ObjectId(watchlist_id), "user_id": user_id},
         {"$set": {"symbols": symbols}},
     )
+    get_watchlists.clear()  # invalidate cache
 
 
 def delete_watchlist(watchlist_id: str):
@@ -154,3 +160,4 @@ def delete_watchlist(watchlist_id: str):
     if db is None:
         return
     db.watchlists.delete_one({"_id": ObjectId(watchlist_id), "user_id": user_id})
+    get_watchlists.clear()  # invalidate cache

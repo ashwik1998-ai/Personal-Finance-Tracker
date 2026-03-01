@@ -1,179 +1,219 @@
 import yfinance as yf
 import requests
 import pandas as pd
-from datetime import datetime
 import streamlit as st
 
-@st.cache_data(ttl=300) # Cache for 5 minutes
-def fetch_stock_price(symbol):
-    """Fetch latest price for a stock/ETF using yfinance."""
+# ── Price fetching ─────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=300)
+def fetch_stock_price(symbol: str) -> float:
+    """Single symbol price — uses batch fetcher internally."""
+    prices = _batch_fetch_prices((symbol,))
+    return prices.get(symbol, 0.0)
+
+
+@st.cache_data(ttl=300)
+def _batch_fetch_prices(symbols: tuple) -> dict:
+    """Batch-download latest close prices for many symbols in one yfinance call."""
+    if not symbols:
+        return {}
     try:
-        ticker = yf.Ticker(symbol)
-        data = ticker.history(period="1d")
-        if not data.empty:
-            return float(data['Close'].iloc[-1])
-        return 0.0
+        data = yf.download(list(symbols), period="1d", progress=False, threads=True)
+        closes = data["Close"] if "Close" in data.columns else data
+        if isinstance(closes, pd.Series):
+            # single symbol comes back as a Series
+            sym = symbols[0]
+            val = float(closes.iloc[-1]) if not closes.empty else 0.0
+            return {sym: val}
+        result = {}
+        for sym in symbols:
+            try:
+                result[sym] = float(closes[sym].dropna().iloc[-1])
+            except Exception:
+                result[sym] = 0.0
+        return result
     except Exception as e:
-        print(f"Error fetching {symbol}: {e}")
-        return 0.0
+        print(f"Batch price fetch error: {e}")
+        return {s: 0.0 for s in symbols}
 
 
-@st.cache_data(ttl=86400)  # cache for 24 hours — company names rarely change
-def get_company_names(symbols: tuple) -> dict:
-    """Return {symbol: 'Company Name'} for news search queries."""
+@st.cache_data(ttl=120)
+def fetch_watchlist_prices(symbols: tuple) -> list[dict]:
+    """Batch-fetch live price + day-change for watchlist symbols (one yfinance call)."""
+    if not symbols:
+        return []
+    try:
+        data = yf.download(list(symbols), period="2d", progress=False, threads=True)
+        closes = data["Close"] if "Close" in data.columns else data
+
+        # Resolve display names in batch
+        name_map = _get_names_fast(symbols)
+
+        results = []
+        for sym in symbols:
+            try:
+                if isinstance(closes, pd.Series):
+                    series = closes
+                else:
+                    series = closes[sym].dropna()
+                if len(series) >= 2:
+                    prev  = float(series.iloc[-2])
+                    price = float(series.iloc[-1])
+                    chg   = price - prev
+                    chg_p = (chg / prev * 100) if prev else 0.0
+                elif len(series) == 1:
+                    price = float(series.iloc[-1])
+                    chg, chg_p = 0.0, 0.0
+                else:
+                    price, chg, chg_p = None, None, None
+            except Exception:
+                price, chg, chg_p = None, None, None
+
+            results.append({
+                "symbol": sym,
+                "name":   name_map.get(sym, sym),
+                "price":  price,
+                "chg":    chg,
+                "chg_pct": chg_p,
+            })
+        return results
+    except Exception as e:
+        print(f"Watchlist price fetch error: {e}")
+        return [{"symbol": s, "name": s, "price": None, "chg": None, "chg_pct": None} for s in symbols]
+
+
+# ── Company name resolution ────────────────────────────────────────────────────
+
+@st.cache_data(ttl=86400)
+def _get_names_fast(symbols: tuple) -> dict:
+    """
+    Fast company-name lookup using Yahoo Finance search API (no full ticker.info call).
+    Falls back to stripping suffix if search fails.
+    """
     names = {}
     for sym in symbols:
         try:
-            info = yf.Ticker(sym).info
-            long = info.get("longName") or info.get("shortName")
-            if long:
-                for suffix in [" Limited", " Ltd", " Ltd.", " Inc.", " Inc", " Corp.", " Corp"]:
-                    long = long.replace(suffix, "")
-                names[sym] = long.strip()
-            else:
-                names[sym] = sym.replace(".NS", "").replace(".BO", "").replace("-USD", "")
+            url = f"https://query2.finance.yahoo.com/v1/finance/search?q={sym}"
+            headers = {"User-Agent": "Mozilla/5.0"}
+            r = requests.get(url, headers=headers, timeout=5)
+            if r.status_code == 200:
+                quotes = r.json().get("quotes", [])
+                match = next((q for q in quotes if q.get("symbol") == sym), None)
+                long = (match or {}).get("shortname") or (match or {}).get("longname")
+                if long:
+                    for s in [" Limited", " Ltd", " Ltd.", " Inc.", " Inc", " Corp.", " Corp"]:
+                        long = long.replace(s, "")
+                    names[sym] = long.strip()
+                    continue
         except Exception:
-            names[sym] = sym.replace(".NS", "").replace(".BO", "")
+            pass
+        names[sym] = sym.replace(".NS", "").replace(".BO", "").replace("-USD", "")
     return names
 
 
-@st.cache_data(ttl=3600)
-def fetch_historical_data(symbol, period="1mo"):
-    """Fetch historical prices for a stock/ETF."""
-    try:
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(period=period)
-        if not df.empty:
-            return df['Close']
-        return pd.Series()
-    except Exception as e:
-        print(f"Error fetching historical for {symbol}: {e}")
-        return pd.Series()
+@st.cache_data(ttl=86400)
+def get_company_names(symbols: tuple) -> dict:
+    """Public wrapper — returns {symbol: 'Company Name'}."""
+    return _get_names_fast(symbols)
 
-@st.cache_data(ttl=3600) # Cache for 1 hour as NAV updates once daily
-def fetch_mf_nav(amfi_code):
-    """Fetch latest NAV for an Indian Mutual Fund using mfapi.in."""
-    try:
-        url = f"https://api.mfapi.in/mf/{amfi_code}"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if data and "data" in data and len(data["data"]) > 0:
-                # Get the latest entry
-                latest_nav = data["data"][0]["nav"]
-                return float(latest_nav)
-        return 0.0
-    except Exception as e:
-        print(f"Error fetching NAV for {amfi_code}: {e}")
-        return 0.0
 
-def search_mf(query):
-    """Search for Mutual Funds to get their AMFI code."""
-    try:
-         url = f"https://api.mfapi.in/mf/search?q={query}"
-         response = requests.get(url, timeout=10)
-         if response.status_code == 200:
-             return response.json()
-         return []
-    except Exception as e:
-         print(f"Error searching MF {query}: {e}")
-         return []
+# ── Portfolio metrics (batched) ────────────────────────────────────────────────
 
-@st.cache_data(ttl=120)   # refresh every 2 minutes
-def fetch_watchlist_prices(symbols: tuple) -> list[dict]:
-    """Batch-fetch live price + day-change for watchlist symbols."""
-    results = []
-    for sym in symbols:
-        try:
-            t = yf.Ticker(sym)
-            hist = t.history(period="2d")
-            if len(hist) >= 2:
-                prev  = float(hist['Close'].iloc[-2])
-                price = float(hist['Close'].iloc[-1])
-                chg   = price - prev
-                chg_p = (chg / prev * 100) if prev else 0.0
-            elif len(hist) == 1:
-                price = float(hist['Close'].iloc[-1])
-                chg, chg_p = 0.0, 0.0
-            else:
-                price, chg, chg_p = None, None, None
-            info = t.fast_info
-            name = getattr(info, "longName", None) or sym
-        except Exception:
-            price, chg, chg_p, name = None, None, None, sym
-        results.append({"symbol": sym, "name": name,
-                         "price": price, "chg": chg, "chg_pct": chg_p})
-    return results
-
-def search_symbols(query):
-    """Search for Stocks/ETFs by name/symbol using yfinance query engine."""
-    try:
-        # yfinance internal search endpoint
-        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            results = []
-            for quote in data.get('quotes', []):
-                # Filter for useful types
-                if quote.get('quoteType') in ['EQUITY', 'ETF']:
-                    results.append({
-                        'symbol': quote.get('symbol'),
-                        'shortname': quote.get('shortname') or quote.get('symbol'),
-                        'exchange': quote.get('exchDisp')
-                    })
-            return results
-        return []
-    except Exception as e:
-        print(f"Error searching symbols {query}: {e}")
-        return []
-
-def get_portfolio_metrics(holdings_df):
-    """Calculate real-time portfolio metrics."""
+def get_portfolio_metrics(holdings_df: pd.DataFrame):
+    """Calculate portfolio metrics using a SINGLE batch price fetch."""
     if holdings_df.empty:
         return 0.0, 0.0, 0.0, 0.0, holdings_df
 
+    stocks_etf = holdings_df[holdings_df["asset_type"].isin(["STOCK", "ETF"])]["symbol"].tolist()
+    mf_rows    = holdings_df[holdings_df["asset_type"] == "MF"]
+
+    # One batch call for all stocks/ETFs
+    price_map = _batch_fetch_prices(tuple(stocks_etf)) if stocks_etf else {}
+
+    # MF NAVs (still individual but cached)
+    for _, row in mf_rows.iterrows():
+        price_map[row["symbol"]] = fetch_mf_nav(row["symbol"])
+
     total_investment = 0.0
-    current_value = 0.0
+    current_value    = 0.0
+    current_prices, current_values, unrealized_pls, unrealized_pl_pcts = [], [], [], []
 
-    current_prices = []
-    current_values = []
-    unrealized_pls = []
-    unrealized_pl_pcts = []
+    for _, row in holdings_df.iterrows():
+        price    = price_map.get(row["symbol"], 0.0)
+        invested = row["avg_price"] * row["quantity"]
+        c_val    = price * row["quantity"]
+        pl       = c_val - invested
+        pl_pct   = (pl / invested * 100) if invested > 0 else 0.0
 
-    for index, row in holdings_df.iterrows():
-        symbol = row['symbol']
-        asset_type = row['asset_type']
-        avg_price = row['avg_price']
-        qty = row['quantity']
-
-        invested = avg_price * qty
         total_investment += invested
-
-        price = 0.0
-        if asset_type in ['STOCK', 'ETF']:
-            price = fetch_stock_price(symbol)
-        elif asset_type == 'MF':
-             price = fetch_mf_nav(symbol)
-
-        c_val = price * qty
-        current_value += c_val
-
-        pl = c_val - invested
-        pl_pct = (pl / invested * 100) if invested > 0 else 0
-
+        current_value    += c_val
         current_prices.append(price)
         current_values.append(c_val)
         unrealized_pls.append(pl)
         unrealized_pl_pcts.append(pl_pct)
 
-    holdings_df['current_price'] = current_prices
-    holdings_df['current_value'] = current_values
-    holdings_df['unrealized_pl'] = unrealized_pls
-    holdings_df['unrealized_pl_pct'] = unrealized_pl_pcts
+    holdings_df = holdings_df.copy()
+    holdings_df["current_price"]    = current_prices
+    holdings_df["current_value"]    = current_values
+    holdings_df["unrealized_pl"]    = unrealized_pls
+    holdings_df["unrealized_pl_pct"] = unrealized_pl_pcts
 
-    total_pl = current_value - total_investment
-    total_pl_pct = (total_pl / total_investment * 100) if total_investment > 0 else 0
-
+    total_pl     = current_value - total_investment
+    total_pl_pct = (total_pl / total_investment * 100) if total_investment > 0 else 0.0
     return total_investment, current_value, total_pl, total_pl_pct, holdings_df
+
+
+# ── Historical data ────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=3600)
+def fetch_historical_data(symbol: str, period: str = "1mo") -> pd.Series:
+    try:
+        df = yf.download(symbol, period=period, progress=False)
+        return df["Close"].squeeze() if not df.empty else pd.Series()
+    except Exception:
+        return pd.Series()
+
+
+# ── MF NAV ────────────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=3600)
+def fetch_mf_nav(amfi_code) -> float:
+    try:
+        r = requests.get(f"https://api.mfapi.in/mf/{amfi_code}", timeout=8)
+        if r.status_code == 200:
+            data = r.json().get("data", [])
+            if data:
+                return float(data[0]["nav"])
+    except Exception:
+        pass
+    return 0.0
+
+
+def search_mf(query: str) -> list:
+    try:
+        r = requests.get(f"https://api.mfapi.in/mf/search?q={query}", timeout=8)
+        return r.json() if r.status_code == 200 else []
+    except Exception:
+        return []
+
+
+# ── Symbol search ──────────────────────────────────────────────────────────────
+
+def search_symbols(query: str) -> list:
+    try:
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=8)
+        if r.status_code == 200:
+            return [
+                {
+                    "symbol":    q.get("symbol"),
+                    "shortname": q.get("shortname") or q.get("symbol"),
+                    "exchange":  q.get("exchDisp"),
+                }
+                for q in r.json().get("quotes", [])
+                if q.get("quoteType") in ("EQUITY", "ETF")
+            ]
+    except Exception as e:
+        print(f"Symbol search error: {e}")
+    return []
