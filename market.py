@@ -208,19 +208,16 @@ def render_market_intelligence():
                     "Filter by Stock", sym_options, key="port_stock_filter"
                 )
 
-            if pf_filter == "🌐 ALL":
-                filtered = port_syms
-            else:
-                filtered = [pf_filter]
+                filtered = port_syms if pf_filter == "🌐 ALL" else [pf_filter]
 
-            filt_names = api.get_company_names(tuple(filtered))
-            names_str  = ", ".join(filt_names.values())
-            st.caption(f"Fetching news for: {names_str}")
-            articles = _fetch_newsapi(filtered)
-            _render_news_list(
-                articles,
-                f"No recent news found for {names_str}. Your NewsAPI key may need the Developer plan."
-            )
+                filt_names = api.get_company_names(tuple(filtered))
+                names_str  = ", ".join(filt_names.values())
+                st.caption(f"Fetching news for: {names_str}")
+                articles = _fetch_newsapi(filtered)
+                _render_news_list(
+                    articles,
+                    f"No recent news found for {names_str}. Your NewsAPI key may need the Developer plan."
+                )
 
     # ── Tab 2: Watchlist News ─────────────────────────────────────────────────
     with tab_wl:

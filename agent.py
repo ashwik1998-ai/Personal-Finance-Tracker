@@ -1,4 +1,3 @@
-import openai
 from openai import OpenAI
 import database as db
 import data_api as api

@@ -200,24 +200,8 @@ def render_portfolio_dashboard():
 
         total_inv, curr_val, total_pl, total_pl_pct, enriched_df = api.get_portfolio_metrics(holdings_df)
 
-        # Replace AMFI code with MF Name globally for charts and tables
-        if not enriched_df.empty:
-            mf_mask = enriched_df['asset_type'] == 'MF'
-            if mf_mask.any():
-                enriched_df.loc[mf_mask, 'symbol'] = enriched_df.loc[mf_mask, 'symbol'].apply(api.get_mf_name)
-
-        # Asset Quick Links
-        if not enriched_df.empty:
-            st.markdown("### 🏷️ Your Assets")
-            unique_symbols = enriched_df['symbol'].unique()
-            cols = st.columns(min(len(unique_symbols), 6))
-            for i, symbol in enumerate(unique_symbols):
-                with cols[i % 6]:
-                    if st.button(symbol, key=f"quick_link_{symbol}", use_container_width=True):
-                        st.info(f"Quick View for {symbol} - [Scroll to Table]")
-            st.markdown("<br>", unsafe_allow_html=True)
-
-        # Historical Trend
+        # Historical Trend — must build symbols_qty BEFORE replacing MF names
+        # (fetch_portfolio_trend needs real yfinance ticker symbols, not MF names)
         if not enriched_df.empty:
             st.subheader("📈 Portfolio Value Trend (1M)")
             with st.spinner("Calculating trend..."):
@@ -245,6 +229,13 @@ def render_portfolio_dashboard():
                         st.info("Trend data unavailable for current assets.")
                 else:
                     st.info("Trend data unavailable for current assets.")
+
+        # Replace AMFI code with MF Name globally for charts and tables
+        # (must happen AFTER trend chart to not break yfinance symbol lookups)
+        if not enriched_df.empty:
+            mf_mask = enriched_df['asset_type'] == 'MF'
+            if mf_mask.any():
+                enriched_df.loc[mf_mask, 'symbol'] = enriched_df.loc[mf_mask, 'symbol'].apply(api.get_mf_name)
 
         if not enriched_df.empty:
             # Metrics row
@@ -314,8 +305,8 @@ def render_portfolio_dashboard():
                     display_df.drop(columns=['ID']).style.format({
                         'Avg Price': '₹{:.2f}', 'Qty': '{:.2f}', 'LTP/NAV': '₹{:.2f}',
                         'Current Value': '₹{:.2f}', 'P&L': '₹{:.2f}', 'P&L %': '{:.2f}%'
-                    }).applymap(
-                        lambda v: 'color: #10b981;' if v > 0 else 'color: #ef4444;' if v < 0 else '',
+                    }).map(
+                        lambda v: 'color: #10b981;' if isinstance(v, (int, float)) and v > 0 else 'color: #ef4444;' if isinstance(v, (int, float)) and v < 0 else '',
                         subset=['P&L', 'P&L %']
                     ),
                     use_container_width=True, hide_index=True
