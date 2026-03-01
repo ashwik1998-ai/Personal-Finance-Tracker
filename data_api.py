@@ -12,68 +12,52 @@ def fetch_stock_price(symbol: str) -> float:
     return prices.get(symbol, 0.0)
 
 
+def _fetch_price_via_api(symbol: str) -> float:
+    """
+    Fetch latest close price directly from Yahoo Finance REST API using requests.
+    This is the primary method — works on any server where requests works.
+    """
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=5d"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        r = requests.get(url, headers=headers, timeout=8)
+        if r.status_code == 200:
+            result = r.json().get("chart", {}).get("result", [])
+            if result:
+                closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
+                closes = [c for c in closes if c is not None]
+                if closes:
+                    return float(closes[-1])
+    except Exception as e:
+        print(f"Yahoo REST API error for {symbol}: {e}")
+    return 0.0
+
+
 @st.cache_data(ttl=300)
 def _batch_fetch_prices(symbols: tuple) -> dict:
-    """Batch-download latest close prices for many symbols in one yfinance call.
-    Falls back to per-symbol Ticker.history() if batch returns 0.0 for any symbol."""
+    """Fetch latest close prices using Yahoo Finance REST API (via requests).
+    Falls back to yfinance as a last resort."""
     if not symbols:
         return {}
 
-    # Deduplicate: yfinance returns unexpected formats with duplicate tickers
+    # Deduplicate while preserving order
     unique_syms = list(dict.fromkeys(symbols))
+    price_lookup = {}
 
-    def _ticker_fallback(sym: str) -> float:
-        """Per-symbol fallback using Ticker.history() — works without threading."""
-        try:
-            hist = yf.Ticker(sym).history(period="5d")
-            if not hist.empty and "Close" in hist.columns:
-                val = hist["Close"].dropna()
-                return float(val.iloc[-1]) if not val.empty else 0.0
-        except Exception:
-            pass
-        return 0.0
-
-    try:
-        # Use threads=False for Linux server compatibility (Render/Docker)
-        data = yf.download(unique_syms, period="5d", progress=False, threads=False)
-        if data.empty:
-            # Full fallback to individual fetches
-            price_lookup = {sym: _ticker_fallback(sym) for sym in unique_syms}
-            return {s: price_lookup.get(s, 0.0) for s in symbols}
-
-        try:
-            closes = data["Close"]
-        except KeyError:
-            price_lookup = {sym: _ticker_fallback(sym) for sym in unique_syms}
-            return {s: price_lookup.get(s, 0.0) for s in symbols}
-
-        # If only 1 unique symbol, result may be a Series not a DataFrame
-        if isinstance(closes, pd.Series):
-            sym = unique_syms[0]
-            val = float(closes.dropna().iloc[-1]) if not closes.dropna().empty else 0.0
-            if val == 0.0:
-                val = _ticker_fallback(sym)
-            return {s: val for s in symbols}
-
-        # Multiple symbols → DataFrame with symbol columns
-        price_lookup = {}
-        for sym in unique_syms:
+    for sym in unique_syms:
+        price = _fetch_price_via_api(sym)
+        if price == 0.0:
+            # Last-resort: try yfinance Ticker (in case REST API is blocked)
             try:
-                col = closes[sym].dropna()
-                price = float(col.iloc[-1]) if not col.empty else 0.0
+                hist = yf.Ticker(sym).history(period="5d")
+                if not hist.empty and "Close" in hist.columns:
+                    col = hist["Close"].dropna()
+                    price = float(col.iloc[-1]) if not col.empty else 0.0
             except Exception:
                 price = 0.0
-            # If still 0, try individual fallback
-            if price == 0.0:
-                price = _ticker_fallback(sym)
-            price_lookup[sym] = price
-        return {s: price_lookup.get(s, 0.0) for s in symbols}
+        price_lookup[sym] = price
 
-    except Exception as e:
-        print(f"Batch price fetch error: {e}")
-        # Full fallback
-        price_lookup = {sym: _ticker_fallback(sym) for sym in unique_syms}
-        return {s: price_lookup.get(s, 0.0) for s in symbols}
+    return {s: price_lookup.get(s, 0.0) for s in symbols}
 
 
 
