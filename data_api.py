@@ -2,6 +2,7 @@ import yfinance as yf
 import requests
 import pandas as pd
 import streamlit as st
+from datetime import date as _date, datetime
 
 # ── Price fetching ─────────────────────────────────────────────────────────────
 
@@ -294,3 +295,132 @@ def search_symbols(query: str) -> list:
     except Exception as e:
         print(f"Symbol search error: {e}")
     return []
+
+
+# ── XIRR ─────────────────────────────────────────────────────────────────────
+
+def _compute_xirr(cashflows: list) -> float:
+    """
+    XIRR via bisection — no scipy needed.
+    cashflows: list of (date_obj, amount) where negative=paid, positive=received.
+    Returns decimal rate (0.45 = 45 % p.a.).
+    """
+    if not cashflows or len(cashflows) < 2:
+        return 0.0
+    dates   = [cf[0] for cf in cashflows]
+    amounts = [cf[1] for cf in cashflows]
+    t0      = min(dates)
+    years   = [(d - t0).days / 365.25 for d in dates]
+
+    def npv(rate: float) -> float:
+        if rate <= -1:
+            return float("inf")
+        return sum(a / ((1.0 + rate) ** t) for a, t in zip(amounts, years))
+
+    try:
+        if npv(-0.9999) * npv(100.0) > 0:
+            return 0.0
+        lo, hi = -0.9999, 100.0
+        for _ in range(200):
+            mid = (lo + hi) / 2.0
+            v   = npv(mid)
+            if abs(v) < 1e-7:
+                return mid
+            if npv(lo) * v < 0:
+                hi = mid
+            else:
+                lo = mid
+        return (lo + hi) / 2.0
+    except Exception:
+        return 0.0
+
+
+def get_xirr_per_symbol(purchases_df: "pd.DataFrame", price_dict: dict) -> dict:
+    """
+    Compute XIRR per symbol from purchase history + current price.
+    Returns {symbol: xirr_pct} e.g. {"TATAPOWER.NS": 45.2}.
+    None means insufficient data.
+    """
+    today  = _date.today()
+    result = {}
+    if purchases_df is None or purchases_df.empty:
+        return result
+
+    for symbol, group in purchases_df.groupby("symbol"):
+        current_price = price_dict.get(symbol, 0.0)
+        if current_price <= 0:
+            result[symbol] = None
+            continue
+
+        cashflows = []
+        for _, row in group.iterrows():
+            try:
+                d = datetime.strptime(str(row["purchase_date"]), "%Y-%m-%d").date()
+            except Exception:
+                d = today
+            cashflows.append((d, -(float(row["buy_price"]) * float(row["quantity"]))))
+
+        total_qty = float(group["quantity"].sum())
+        cashflows.append((today, current_price * total_qty))
+
+        xirr = _compute_xirr(cashflows)
+        result[symbol] = round(xirr * 100, 2)
+
+    return result
+
+
+# ── Benchmark (NIFTY 50) ──────────────────────────────────────────────────────
+
+@st.cache_data(ttl=600)
+def fetch_benchmark_trend() -> "pd.Series":
+    """
+    Fetch NIFTY 50 (^NSEI) 1-month daily close prices via Yahoo Finance REST API.
+    Returns a pd.Series indexed by DatetimeIndex, named 'NIFTY 50'.
+    """
+    try:
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI?interval=1d&range=1mo"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        r = requests.get(url, headers=headers, timeout=8)
+        if r.status_code == 200:
+            res = r.json().get("chart", {}).get("result", [])
+            if res:
+                ts     = res[0].get("timestamp", [])
+                closes = res[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
+                pairs  = [
+                    (pd.Timestamp(t, unit="s").normalize(), c)
+                    for t, c in zip(ts, closes) if c is not None
+                ]
+                if pairs:
+                    idx, vals = zip(*pairs)
+                    return pd.Series(list(vals), index=pd.DatetimeIndex(idx), name="NIFTY 50")
+    except Exception as e:
+        print(f"Benchmark fetch error: {e}")
+    return pd.Series(dtype=float, name="NIFTY 50")
+
+
+# ── Sector data ───────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=86400)
+def fetch_sector(symbol: str) -> str:
+    """
+    Return the GICS sector for a stock/ETF symbol via Yahoo Finance quoteSummary.
+    Returns 'Other' for mutual funds or on any failure.
+    """
+    try:
+        url = (
+            f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+            f"?modules=assetProfile"
+        )
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        r = requests.get(url, headers=headers, timeout=6)
+        if r.status_code == 200:
+            profile = (
+                r.json()
+                .get("quoteSummary", {})
+                .get("result", [{}])[0]
+                .get("assetProfile", {})
+            )
+            return profile.get("sector", "") or "Other"
+    except Exception:
+        pass
+    return "Other"

@@ -251,6 +251,126 @@ def delete_holding(holding_id: str):
     get_all_purchases.clear()
 
 
+# ── Price Alerts ─────────────────────────────────────────────────────────────────────────
+
+def add_alert(symbol: str, target_price: float, condition: str,
+              telegram_chat_id: str):
+    """
+    Create a new price alert for the current user.
+    condition: 'above' | 'below'
+    """
+    user_id = get_current_user_id()
+    if not user_id:
+        return
+    database = _db()
+    if database is None:
+        return
+    database.price_alerts.insert_one({
+        "user_id":          user_id,
+        "symbol":           symbol.upper(),
+        "target_price":     float(target_price),
+        "condition":        condition,
+        "telegram_chat_id": str(telegram_chat_id).strip(),
+        "active":           True,
+        "triggered_at":     None,
+        "created_at":       datetime.utcnow(),
+    })
+    get_all_alerts.clear()
+
+
+@st.cache_data(ttl=30)
+def get_all_alerts(user_id: str) -> pd.DataFrame:
+    """Return all alerts (active + triggered) for the given user_id.
+    user_id passed as argument so each user gets their own cache slot.
+    """
+    if not user_id:
+        return pd.DataFrame()
+    database = _db()
+    if database is None:
+        return pd.DataFrame()
+    docs = list(database.price_alerts.find(
+        {"user_id": user_id},
+        sort=[("created_at", -1)]
+    ))
+    if not docs:
+        return pd.DataFrame()
+    df = pd.DataFrame(docs)
+    df["id"] = df["_id"].astype(str)
+    return df.drop(columns=["_id"])
+
+
+def delete_alert(alert_id: str):
+    """Delete a price alert."""
+    user_id = get_current_user_id()
+    if not user_id:
+        return
+    database = _db()
+    if database is None:
+        return
+    database.price_alerts.delete_one(
+        {"_id": ObjectId(alert_id), "user_id": user_id}
+    )
+    get_all_alerts.clear()
+
+
+# ── User Settings (persistent per-user preferences) ───────────────────────────
+
+def save_user_setting(key: str, value: str):
+    """Persist a user-level setting (e.g. telegram_chat_id) in MongoDB."""
+    user_id = get_current_user_id()
+    if not user_id:
+        return
+    database = _db()
+    if database is None:
+        return
+    database.user_settings.update_one(
+        {"user_id": user_id},
+        {"$set": {key: value, "updated_at": datetime.utcnow()}},
+        upsert=True,
+    )
+    _get_user_setting_cached.clear()
+
+
+@st.cache_data(ttl=300)
+def _get_user_setting_cached(user_id: str, key: str) -> str:
+    """Cached helper — user_id in signature so each user gets own slot."""
+    database = _db()
+    if database is None:
+        return ""
+    doc = database.user_settings.find_one({"user_id": user_id}) or {}
+    return doc.get(key, "")
+
+
+def get_user_setting(key: str) -> str:
+    """Return a saved user setting from MongoDB."""
+    user_id = get_current_user_id()
+    if not user_id:
+        return ""
+    return _get_user_setting_cached(user_id, key)
+
+
+def get_all_alerts_for_checker() -> list:
+    """
+    Return ALL active alerts across all users.
+    Called by the alert_checker.py cron script (not user-scoped).
+    """
+    database = _db()
+    if database is None:
+        return []
+    return list(database.price_alerts.find({"active": True}))
+
+
+def mark_alert_triggered(alert_id: str):
+    """Deactivate an alert after it fires."""
+    database = _db()
+    if database is None:
+        return
+    database.price_alerts.update_one(
+        {"_id": ObjectId(alert_id)},
+        {"$set": {"active": False, "triggered_at": datetime.utcnow()}}
+    )
+
+
 # ── Watchlists ────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=30)

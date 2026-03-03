@@ -318,9 +318,18 @@ if "active_watchlist_id" not in st.session_state:
     st.session_state.active_watchlist_id = None
 
 # ─── Auth Gate ────────────────────────────────────────────────────────────────
+# Set LOCAL_DEV=true in your .env to bypass login during local testing.
+_LOCAL_DEV = os.environ.get("LOCAL_DEV", "false").lower() == "true"
+
 if "user" not in st.session_state:
-    auth.render_login_page()
-    st.stop()
+    if _LOCAL_DEV:
+        st.session_state["user"] = {
+            "id":    "local_dev_user",
+            "email": "dev@localhost",
+        }
+    else:
+        auth.render_login_page()
+        st.stop()
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  SIDEBAR
@@ -398,10 +407,19 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 #  MAIN TABS
 # ─────────────────────────────────────────────────────────────────────────────
-tab1, tab2 = st.tabs(["📊  Portfolio Dashboard", "📰  Market Intelligence"])
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📊  Portfolio Dashboard", "⭐  Watchlist",
+    "📰  Market Intelligence", "🔔  Alerts"
+])
 
 with tab1:
     portfolio.render_portfolio_dashboard()
 
 with tab2:
+    portfolio.render_watchlist_tab()
+
+with tab3:
     market.render_market_intelligence()
+
+with tab4:
+    portfolio.render_alerts_tab()
