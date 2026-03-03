@@ -229,6 +229,8 @@ def fetch_portfolio_trend(symbols_qty: tuple) -> "pd.Series":
         
         # Drop columns (symbols) that returned entirely NaN
         closes = closes.dropna(axis=1, how='all')
+        if closes.empty:
+            return pd.Series(dtype=float)
 
         total = None
         for sym in unique_symbols:
