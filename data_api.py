@@ -192,9 +192,16 @@ def fetch_historical_data(symbol: str, period: str = "1mo") -> pd.Series:
     """Single symbol historical close — uses ticker.history() to avoid MultiIndex issues."""
     try:
         hist = yf.Ticker(symbol).history(period=period)
-        return hist["Close"] if not hist.empty else pd.Series()
+        if not hist.empty:
+            s = hist["Close"]
+            # Convert timezone-aware datetimes to naive, then normalize to midnight
+            if hasattr(s.index, 'tz') and s.index.tz is not None:
+                s.index = s.index.tz_convert(None)
+            s.index = pd.to_datetime(s.index).normalize()
+            return s
+        return pd.Series(dtype=float)
     except Exception:
-        return pd.Series()
+        return pd.Series(dtype=float)
 
 
 @st.cache_data(ttl=600)
