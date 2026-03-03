@@ -12,8 +12,7 @@ import auth
 import json
 import extra_streamlit_components as stx
 
-# Setup cookie manager for session persistence
-@st.cache_resource(experimental_allow_widgets=True)
+@st.cache_resource
 def get_manager():
     return stx.CookieManager()
 
