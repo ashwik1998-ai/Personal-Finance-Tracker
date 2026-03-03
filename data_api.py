@@ -226,13 +226,20 @@ def fetch_portfolio_trend(symbols_qty: tuple) -> "pd.Series":
             sym = unique_symbols[0]
             qty = qty_map.get(sym, 1)
             return (closes.dropna() * qty).rename("Value")
+        
+        # Drop columns (symbols) that returned entirely NaN
+        closes = closes.dropna(axis=1, how='all')
 
         total = None
         for sym in unique_symbols:
             if sym in closes.columns:
                 try:
                     series = closes[sym].dropna() * qty_map.get(sym, 1)
-                    total = series if total is None else total.add(series, fill_value=0)
+                    if total is None:
+                        total = series
+                    else:
+                        # Forward fill then fillna(0) to handle missing days between symbols cleanly
+                        total = total.add(series, fill_value=0)
                 except Exception:
                     continue
         return total if total is not None else pd.Series(dtype=float)
