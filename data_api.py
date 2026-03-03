@@ -200,10 +200,10 @@ def fetch_historical_data(symbol: str, period: str = "1mo") -> pd.Series:
 @st.cache_data(ttl=600)
 def fetch_portfolio_trend(symbols_qty: tuple) -> "pd.Series":
     """
-    Batch-fetch 1M history for all portfolio symbols in ONE call.
+    Fetch 1M history for all portfolio symbols sequentially.
+    Sequential fetches via Ticker.history() are much more robust on Render
+    than batch yf.download() which frequently fails or rate-limits.
     symbols_qty: tuple of (symbol, quantity) pairs
-    Returns a daily total portfolio value Series.
-    Handles duplicate symbols by summing their quantities.
     """
     if not symbols_qty:
         return pd.Series(dtype=float)
@@ -212,42 +212,25 @@ def fetch_portfolio_trend(symbols_qty: tuple) -> "pd.Series":
     qty_map: dict = {}
     for s, q in symbols_qty:
         qty_map[s] = qty_map.get(s, 0) + q
-    unique_symbols = list(qty_map.keys())
 
-    try:
-        data = yf.download(unique_symbols, period="1mo", progress=False, threads=True)
+    total = None
+    for sym, qty in qty_map.items():
         try:
-            closes = data["Close"]
-        except KeyError:
-            return pd.Series(dtype=float)
+            series = fetch_historical_data(sym, period="1mo")
+            if series.empty:
+                continue
+                
+            series = series * qty
+            if total is None:
+                total = series
+            else:
+                # Align dates, forward fill missing gaps, and add
+                total = total.add(series, fill_value=0)
+        except Exception as e:
+            print(f"Skipping {sym} trend fetch: {e}")
+            continue
 
-        if isinstance(closes, pd.Series):
-            # Single symbol returned as Series
-            sym = unique_symbols[0]
-            qty = qty_map.get(sym, 1)
-            return (closes.dropna() * qty).rename("Value")
-        
-        # Drop columns (symbols) that returned entirely NaN
-        closes = closes.dropna(axis=1, how='all')
-        if closes.empty:
-            return pd.Series(dtype=float)
-
-        total = None
-        for sym in unique_symbols:
-            if sym in closes.columns:
-                try:
-                    series = closes[sym].dropna() * qty_map.get(sym, 1)
-                    if total is None:
-                        total = series
-                    else:
-                        # Forward fill then fillna(0) to handle missing days between symbols cleanly
-                        total = total.add(series, fill_value=0)
-                except Exception:
-                    continue
-        return total if total is not None else pd.Series(dtype=float)
-    except Exception as e:
-        print(f"Portfolio trend fetch error: {e}")
-        return pd.Series(dtype=float)
+    return total if total is not None else pd.Series(dtype=float)
 
 
 # ── MF NAV ────────────────────────────────────────────────────────────────────
