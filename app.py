@@ -9,6 +9,15 @@ import portfolio
 import market
 import agent
 import auth
+import json
+import extra_streamlit_components as stx
+
+# Setup cookie manager for session persistence
+@st.cache_resource(experimental_allow_widgets=True)
+def get_manager():
+    return stx.CookieManager()
+
+cookie_manager = get_manager()
 
 # --- Page Config ---
 st.set_page_config(
@@ -328,8 +337,23 @@ if "user" not in st.session_state:
             "email": "dev@localhost",
         }
     else:
-        auth.render_login_page()
-        st.stop()
+        # ── Check for existing persistent session cookie ──
+        saved_user = cookie_manager.get(cookie="auth_token")
+        if saved_user:
+            try:
+                # If cookie exists, parse it and set session state
+                if isinstance(saved_user, str):
+                    st.session_state["user"] = json.loads(saved_user)
+                else: 
+                    st.session_state["user"] = saved_user
+                st.rerun()
+            except Exception:
+                pass
+        
+        # If still no user, block and show login page
+        if "user" not in st.session_state:
+            auth.render_login_page(cookie_manager=cookie_manager)
+            st.stop()
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  SIDEBAR
@@ -355,6 +379,7 @@ with st.sidebar:
     st.markdown('<div class="logout-btn">', unsafe_allow_html=True)
     if st.button("⏻  Logout", use_container_width=True):
         st.session_state.clear()
+        cookie_manager.delete("auth_token")
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 

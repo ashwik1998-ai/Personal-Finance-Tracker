@@ -98,7 +98,7 @@ def _sign_up(email: str, password: str) -> tuple[dict | None, str | None]:
 
 # ── LOGIN PAGE ────────────────────────────────────────────────────────────────
 
-def render_login_page():
+def render_login_page(cookie_manager=None):
     st.markdown("""
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
@@ -200,6 +200,9 @@ def render_login_page():
             user = _handle_google_callback(code)
         if user:
             st.session_state["user"] = user
+            if cookie_manager:
+                import json
+                cookie_manager.set("auth_token", json.dumps(user), max_age=30*24*60*60)
             st.query_params.clear()
             st.rerun()
         else:
@@ -266,6 +269,9 @@ def render_login_page():
                             user, err = _sign_in(email, password)
                         if user:
                             st.session_state["user"] = user
+                            if cookie_manager:
+                                import json
+                                cookie_manager.set("auth_token", json.dumps(user), max_age=30*24*60*60)
                             st.rerun()
                         else:
                             st.error(f"❌ {err}")
@@ -289,6 +295,9 @@ def render_login_page():
                             user, err = _sign_up(email, password)
                         if user:
                             st.session_state["user"] = user
+                            if cookie_manager:
+                                import json
+                                cookie_manager.set("auth_token", json.dumps(user), max_age=30*24*60*60)
                             st.rerun()
                         else:
                             st.error(f"❌ {err}")
