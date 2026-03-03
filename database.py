@@ -1,7 +1,10 @@
 """
 database.py – MongoDB data layer.
 Auth is handled by Clerk. We use the Clerk user_id as the primary key for all
-records in our MongoDB collections (holdings, watchlists).
+records in our MongoDB collections (holdings, purchases, watchlists).
+
+Holdings collection:   Aggregated view — one doc per symbol per user (weighted avg)
+Purchases collection:  Every individual buy transaction — source of truth
 """
 
 import pandas as pd
@@ -57,37 +60,163 @@ def get_current_user_email() -> str | None:
     return user.get("email") if user else None
 
 
-# ── Holdings ─────────────────────────────────────────────────────────────────
+# ── Internal: Rebuild aggregated holding from purchases ───────────────────────
 
-def add_holding(symbol: str, asset_type: str, avg_price: float,
-                quantity: float, purchase_date: str):
+def _rebuild_holding(user_id: str, symbol: str, asset_type: str):
+    """
+    Recalculate the aggregated holding for a symbol from all its purchases.
+    Upserts a single doc into `holdings`. Removes the holding if no purchases remain.
+    """
+    database = _db()
+    if database is None:
+        return
+
+    purchases = list(database.purchases.find(
+        {"user_id": user_id, "symbol": symbol}
+    ))
+
+    if not purchases:
+        # No purchases left — remove the holding entirely
+        database.holdings.delete_one({"user_id": user_id, "symbol": symbol})
+    else:
+        total_qty = sum(p["quantity"] for p in purchases)
+        total_cost = sum(p["buy_price"] * p["quantity"] for p in purchases)
+        weighted_avg = total_cost / total_qty if total_qty > 0 else 0.0
+        earliest_date = min(p.get("purchase_date", "") for p in purchases)
+
+        database.holdings.update_one(
+            {"user_id": user_id, "symbol": symbol},
+            {"$set": {
+                "user_id":       user_id,
+                "symbol":        symbol,
+                "asset_type":    asset_type,
+                "avg_price":     round(weighted_avg, 4),
+                "quantity":      round(total_qty, 4),
+                "purchase_date": earliest_date,
+                "updated_at":    datetime.utcnow(),
+            }},
+            upsert=True,
+        )
+
+    # Bust caches
+    get_all_holdings.clear()
+    get_all_purchases.clear()
+
+
+# ── Purchases (individual buy transactions) ───────────────────────────────────
+
+def add_purchase(symbol: str, asset_type: str, buy_price: float,
+                 quantity: float, purchase_date: str):
+    """
+    Add an individual purchase record and update the aggregated holding.
+    If a holding already exists for this symbol, the weighted average is recalculated.
+    """
     user_id = get_current_user_id()
     if not user_id:
         return
-    db = _db()
-    if db is None:
+    database = _db()
+    if database is None:
         return
-    db.holdings.insert_one({
+
+    sym = symbol.upper()
+    atype = asset_type.upper()
+
+    database.purchases.insert_one({
         "user_id":       user_id,
-        "symbol":        symbol.upper(),
-        "asset_type":    asset_type.upper(),
-        "avg_price":     float(avg_price),
+        "symbol":        sym,
+        "asset_type":    atype,
+        "buy_price":     float(buy_price),
         "quantity":      float(quantity),
         "purchase_date": purchase_date,
         "created_at":    datetime.utcnow(),
     })
-    get_all_holdings.clear()  # invalidate cache
 
+    _rebuild_holding(user_id, sym, atype)
+
+
+@st.cache_data(ttl=30)
+def get_all_purchases() -> pd.DataFrame:
+    """Return all individual purchase records for the current user."""
+    user_id = get_current_user_id()
+    if not user_id:
+        return pd.DataFrame()
+    database = _db()
+    if database is None:
+        return pd.DataFrame()
+    docs = list(database.purchases.find(
+        {"user_id": user_id},
+        sort=[("purchase_date", -1), ("created_at", -1)]
+    ))
+    if not docs:
+        return pd.DataFrame()
+    df = pd.DataFrame(docs)
+    df["id"] = df["_id"].astype(str)
+    return df.drop(columns=["_id"])
+
+
+def update_purchase(purchase_id: str, buy_price: float, quantity: float,
+                    purchase_date: str):
+    """
+    Edit an existing purchase and recalculate the parent holding's weighted average.
+    """
+    user_id = get_current_user_id()
+    if not user_id:
+        return
+    database = _db()
+    if database is None:
+        return
+
+    doc = database.purchases.find_one(
+        {"_id": ObjectId(purchase_id), "user_id": user_id}
+    )
+    if not doc:
+        return
+
+    database.purchases.update_one(
+        {"_id": ObjectId(purchase_id), "user_id": user_id},
+        {"$set": {
+            "buy_price":     float(buy_price),
+            "quantity":      float(quantity),
+            "purchase_date": purchase_date,
+            "updated_at":    datetime.utcnow(),
+        }},
+    )
+
+    _rebuild_holding(user_id, doc["symbol"], doc["asset_type"])
+
+
+def delete_purchase(purchase_id: str):
+    """
+    Delete a purchase and recalculate (or remove) the parent holding.
+    """
+    user_id = get_current_user_id()
+    if not user_id:
+        return
+    database = _db()
+    if database is None:
+        return
+
+    doc = database.purchases.find_one(
+        {"_id": ObjectId(purchase_id), "user_id": user_id}
+    )
+    if not doc:
+        return
+
+    database.purchases.delete_one({"_id": ObjectId(purchase_id), "user_id": user_id})
+    _rebuild_holding(user_id, doc["symbol"], doc["asset_type"])
+
+
+# ── Holdings (aggregated, auto-calculated) ────────────────────────────────────
 
 @st.cache_data(ttl=30)
 def get_all_holdings() -> pd.DataFrame:
     user_id = get_current_user_id()
     if not user_id:
         return pd.DataFrame()
-    db = _db()
-    if db is None:
+    database = _db()
+    if database is None:
         return pd.DataFrame()
-    docs = list(db.holdings.find({"user_id": user_id}))
+    docs = list(database.holdings.find({"user_id": user_id}))
     if not docs:
         return pd.DataFrame()
     df = pd.DataFrame(docs)
@@ -96,14 +225,30 @@ def get_all_holdings() -> pd.DataFrame:
 
 
 def delete_holding(holding_id: str):
+    """
+    Delete a holding and ALL its underlying purchases.
+    """
     user_id = get_current_user_id()
     if not user_id:
         return
-    db = _db()
-    if db is None:
+    database = _db()
+    if database is None:
         return
-    db.holdings.delete_one({"_id": ObjectId(holding_id), "user_id": user_id})
-    get_all_holdings.clear()  # invalidate cache
+
+    doc = database.holdings.find_one(
+        {"_id": ObjectId(holding_id), "user_id": user_id}
+    )
+    if doc:
+        # Remove all purchases for this symbol too
+        database.purchases.delete_many(
+            {"user_id": user_id, "symbol": doc["symbol"]}
+        )
+        database.holdings.delete_one(
+            {"_id": ObjectId(holding_id), "user_id": user_id}
+        )
+
+    get_all_holdings.clear()
+    get_all_purchases.clear()
 
 
 # ── Watchlists ────────────────────────────────────────────────────────────────
@@ -113,10 +258,10 @@ def get_watchlists() -> list[dict]:
     user_id = get_current_user_id()
     if not user_id:
         return []
-    db = _db()
-    if db is None:
+    database = _db()
+    if database is None:
         return []
-    docs = list(db.watchlists.find({"user_id": user_id}))
+    docs = list(database.watchlists.find({"user_id": user_id}))
     for doc in docs:
         doc["id"] = str(doc["_id"])
     return docs
@@ -126,38 +271,40 @@ def create_watchlist(name: str):
     user_id = get_current_user_id()
     if not user_id:
         return
-    db = _db()
-    if db is None:
+    database = _db()
+    if database is None:
         return
-    db.watchlists.insert_one({
+    database.watchlists.insert_one({
         "user_id":    user_id,
         "name":       name,
         "symbols":    [],
         "created_at": datetime.utcnow(),
     })
-    get_watchlists.clear()  # invalidate cache
+    get_watchlists.clear()
 
 
 def update_watchlist_symbols(watchlist_id: str, symbols: list[str]):
     user_id = get_current_user_id()
     if not user_id:
         return
-    db = _db()
-    if db is None:
+    database = _db()
+    if database is None:
         return
-    db.watchlists.update_one(
+    database.watchlists.update_one(
         {"_id": ObjectId(watchlist_id), "user_id": user_id},
         {"$set": {"symbols": symbols}},
     )
-    get_watchlists.clear()  # invalidate cache
+    get_watchlists.clear()
 
 
 def delete_watchlist(watchlist_id: str):
     user_id = get_current_user_id()
     if not user_id:
         return
-    db = _db()
-    if db is None:
+    database = _db()
+    if database is None:
         return
-    db.watchlists.delete_one({"_id": ObjectId(watchlist_id), "user_id": user_id})
-    get_watchlists.clear()  # invalidate cache
+    database.watchlists.delete_one(
+        {"_id": ObjectId(watchlist_id), "user_id": user_id}
+    )
+    get_watchlists.clear()

@@ -8,7 +8,6 @@ import data_api as api
 
 def render_score_bar(label, score, max_score=100):
     """Trendlyne-style linear progress bar for scores."""
-    # Color logic: Red -> Yellow -> Green
     if score < 33: color = "#ef4444"
     elif score < 66: color = "#f59e0b"
     else: color = "#10b981"
@@ -76,7 +75,6 @@ def _render_watchlist_panel():
     active_wl = wl_map[sel_name]
     syms = active_wl.get("symbols", [])
 
-    # Delete list button (right-aligned via columns)
     if st.button("🗑️ Delete this list", use_container_width=True, key="wl_del_list"):
         db.delete_watchlist(active_wl["id"])
         st.rerun(scope="fragment")
@@ -158,6 +156,116 @@ def _render_watchlist_panel():
                 st.rerun(scope="fragment")
 
 
+# ── Past Buys Tab ─────────────────────────────────────────────────────────────
+
+@st.fragment
+def _render_past_buys():
+    """Render the Past Buys tab — shows every individual purchase with edit/delete."""
+    purchases_df = db.get_all_purchases()
+
+    if purchases_df.empty:
+        st.info("No purchase history yet. Add your first holding below.")
+        return
+
+    # Display columns (keep id for operations)
+    cols_needed = ["id", "symbol", "asset_type", "buy_price", "quantity", "purchase_date"]
+    missing = [c for c in cols_needed if c not in purchases_df.columns]
+    if missing:
+        st.warning(f"Unexpected data format. Missing: {missing}")
+        return
+
+    disp = purchases_df[cols_needed].copy()
+    disp["invested"] = (disp["buy_price"] * disp["quantity"]).round(2)
+
+    st.markdown("### 📋 Purchase History")
+    st.caption("Every individual buy you've made. Edit or delete any entry — the aggregated holding is updated automatically.")
+
+    # ── Table view ────────────────────────────────────────────────────────────
+    table_df = disp.drop(columns=["id"]).rename(columns={
+        "symbol":        "Symbol",
+        "asset_type":    "Type",
+        "buy_price":     "Buy Price",
+        "quantity":      "Qty",
+        "purchase_date": "Date",
+        "invested":      "Invested",
+    })
+    st.dataframe(
+        table_df.style.format({
+            "Buy Price": "₹{:.2f}",
+            "Qty":       "{:.4f}",
+            "Invested":  "₹{:.2f}",
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown("---")
+
+    # ── Edit / Delete panel ───────────────────────────────────────────────────
+    st.markdown("#### ✏️ Edit or Delete a Purchase")
+
+    # Build a nice label per purchase for the selectbox
+    def _label(row):
+        return f"{row['symbol']} — {row['quantity']} units @ ₹{row['buy_price']} ({row['purchase_date']})"
+
+    options = {_label(row): row["id"] for _, row in disp.iterrows()}
+    selected_label = st.selectbox("Select purchase", list(options.keys()),
+                                  label_visibility="collapsed",
+                                  key="past_buy_select")
+    selected_id = options[selected_label]
+
+    # Get current values for the selected purchase
+    sel_row = disp[disp["id"] == selected_id].iloc[0]
+
+    action = st.radio("Action", ["✏️ Edit", "🗑️ Delete"],
+                      horizontal=True, key="past_buy_action")
+
+    if action == "✏️ Edit":
+        with st.form("edit_purchase_form"):
+            ec1, ec2 = st.columns(2)
+            with ec1:
+                new_price = st.number_input(
+                    "Buy Price (₹)", min_value=0.01,
+                    value=float(sel_row["buy_price"]),
+                    format="%.2f", step=0.01
+                )
+            with ec2:
+                new_qty = st.number_input(
+                    "Quantity", min_value=0.0001,
+                    value=float(sel_row["quantity"]),
+                    format="%.4f", step=0.0001
+                )
+            try:
+                default_date = datetime.strptime(str(sel_row["purchase_date"]), "%Y-%m-%d").date()
+            except Exception:
+                default_date = datetime.now().date()
+            new_date = st.date_input("Purchase Date", value=default_date)
+
+            if st.form_submit_button("💾 Save Changes", use_container_width=True, type="primary"):
+                db.update_purchase(
+                    selected_id,
+                    float(new_price),
+                    float(new_qty),
+                    new_date.strftime("%Y-%m-%d"),
+                )
+                st.success(f"Updated {sel_row['symbol']} purchase. Holding recalculated ✅")
+                st.rerun(scope="fragment")
+
+    else:  # Delete
+        st.warning(
+            f"This will permanently remove the purchase of **{sel_row['quantity']} units** "
+            f"of **{sel_row['symbol']}** at ₹{sel_row['buy_price']}. "
+            f"The aggregated holding will be recalculated (or removed if this was the only buy)."
+        )
+        if st.button("🗑️ Confirm Delete", type="primary", use_container_width=True,
+                     key="confirm_del_purchase"):
+            db.delete_purchase(selected_id)
+            st.success("Purchase deleted. Holdings updated ✅")
+            st.rerun(scope="fragment")
+
+
+# ── Main Portfolio Dashboard ──────────────────────────────────────────────────
+
 def render_portfolio_dashboard():
     # ── Two-column layout: portfolio left, watchlists right ──────────────────
     col_left, col_right = st.columns([7, 3], gap="large")
@@ -185,153 +293,184 @@ def render_portfolio_dashboard():
         </div>
         """, unsafe_allow_html=True)
 
-        # Fetch holdings and calculate metrics
-        holdings_df = db.get_all_holdings()
+        # ── Tabs: Holdings / Past Buys / Add Holding ─────────────────────────
+        tab_holdings, tab_past_buys, tab_add = st.tabs([
+            "📦 Holdings", "📋 Past Buys", "➕ Add Holding"
+        ])
 
-        # Asset Filtering
-        if not holdings_df.empty:
-            asset_filter = st.segmented_control(
-                "Filter by Asset Type",
-                options=["All", "Stock", "ETF", "MF"],
-                default="All"
-            )
-            if asset_filter != "All":
-                holdings_df = holdings_df[holdings_df['asset_type'] == asset_filter.upper()]
+        with tab_holdings:
+            holdings_df = db.get_all_holdings()
 
-        total_inv, curr_val, total_pl, total_pl_pct, enriched_df = api.get_portfolio_metrics(holdings_df)
+            # Asset Filter
+            if not holdings_df.empty:
+                asset_filter = st.segmented_control(
+                    "Filter by Asset Type",
+                    options=["All", "Stock", "ETF", "MF"],
+                    default="All"
+                )
+                if asset_filter != "All":
+                    holdings_df = holdings_df[holdings_df['asset_type'] == asset_filter.upper()]
 
-        # Historical Trend — must build symbols_qty BEFORE replacing MF names
-        # (fetch_portfolio_trend needs real yfinance ticker symbols, not MF names)
-        if not enriched_df.empty:
-            st.subheader("📈 Portfolio Value Trend (1M)")
-            with st.spinner("Calculating trend..."):
-                stock_etf = enriched_df[enriched_df["asset_type"].isin(["STOCK", "ETF"])]
-                if not stock_etf.empty:
-                    symbols_qty = tuple(
-                        (row["symbol"], float(row["quantity"]))
-                        for _, row in stock_etf.iterrows()
-                    )
-                    trend = api.fetch_portfolio_trend(symbols_qty)
-                    if trend is not None and not trend.empty:
-                        trend_df = trend.reset_index()
-                        trend_df.columns = ["Date", "Value"]
-                        fig_trend = px.line(trend_df, x="Date", y="Value",
-                                            color_discrete_sequence=["#38bdf8"])
-                        fig_trend.update_layout(
-                            margin={"t": 30, "b": 0, "l": 0, "r": 0},
-                            paper_bgcolor="rgba(0,0,0,0)",
-                            plot_bgcolor="rgba(0,0,0,0)",
-                            font={"color": "#94a3b8"},
-                            xaxis_title="", yaxis_title="Value (₹)", showlegend=False
+            total_inv, curr_val, total_pl, total_pl_pct, enriched_df = api.get_portfolio_metrics(holdings_df)
+
+            # Historical Trend — must build symbols_qty BEFORE replacing MF names
+            if not enriched_df.empty:
+                st.subheader("📈 Portfolio Value Trend (1M)")
+                with st.spinner("Calculating trend..."):
+                    stock_etf = enriched_df[enriched_df["asset_type"].isin(["STOCK", "ETF"])]
+                    if not stock_etf.empty:
+                        symbols_qty = tuple(
+                            (row["symbol"], float(row["quantity"]))
+                            for _, row in stock_etf.iterrows()
                         )
-                        st.plotly_chart(fig_trend, use_container_width=True)
+                        trend = api.fetch_portfolio_trend(symbols_qty)
+                        if trend is not None and not trend.empty:
+                            trend_df = trend.reset_index()
+                            trend_df.columns = ["Date", "Value"]
+                            fig_trend = px.line(trend_df, x="Date", y="Value",
+                                                color_discrete_sequence=["#38bdf8"])
+                            fig_trend.update_layout(
+                                margin={"t": 30, "b": 0, "l": 0, "r": 0},
+                                paper_bgcolor="rgba(0,0,0,0)",
+                                plot_bgcolor="rgba(0,0,0,0)",
+                                font={"color": "#94a3b8"},
+                                xaxis_title="", yaxis_title="Value (₹)", showlegend=False
+                            )
+                            st.plotly_chart(fig_trend, use_container_width=True)
+                        else:
+                            st.info("Trend data unavailable for current assets.")
                     else:
                         st.info("Trend data unavailable for current assets.")
-                else:
-                    st.info("Trend data unavailable for current assets.")
 
-        # Replace AMFI code with MF Name globally for charts and tables
-        # (must happen AFTER trend chart to not break yfinance symbol lookups)
-        if not enriched_df.empty:
-            mf_mask = enriched_df['asset_type'] == 'MF'
-            if mf_mask.any():
-                enriched_df.loc[mf_mask, 'symbol'] = enriched_df.loc[mf_mask, 'symbol'].apply(api.get_mf_name)
+            # Replace AMFI codes with MF names (after trend chart)
+            if not enriched_df.empty:
+                mf_mask = enriched_df['asset_type'] == 'MF'
+                if mf_mask.any():
+                    enriched_df.loc[mf_mask, 'symbol'] = enriched_df.loc[mf_mask, 'symbol'].apply(api.get_mf_name)
 
-        if not enriched_df.empty:
-            # Metrics row
-            m1, m2, m3 = st.columns(3)
-            with m1:
-                st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-label">CURRENT VALUE</div>
-                        <div class="metric-value">₹{curr_val:,.2f}</div>
-                    </div>
-                """, unsafe_allow_html=True)
-            with m2:
-                st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-label">TOTAL INVESTMENT</div>
-                        <div class="metric-value">₹{total_inv:,.2f}</div>
-                    </div>
-                """, unsafe_allow_html=True)
-            with m3:
-                p_class = "profit" if total_pl >= 0 else "loss"
-                st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-label">OVERALL P&L</div>
-                        <div class="metric-value {p_class}">₹{total_pl:,.2f} ({total_pl_pct:+.2f}%)</div>
-                    </div>
-                """, unsafe_allow_html=True)
+            if not enriched_df.empty:
+                # Metrics row
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    st.markdown(f"""
+                        <div class="metric-card">
+                            <div class="metric-label">CURRENT VALUE</div>
+                            <div class="metric-value">₹{curr_val:,.2f}</div>
+                        </div>
+                    """, unsafe_allow_html=True)
+                with m2:
+                    st.markdown(f"""
+                        <div class="metric-card">
+                            <div class="metric-label">TOTAL INVESTMENT</div>
+                            <div class="metric-value">₹{total_inv:,.2f}</div>
+                        </div>
+                    """, unsafe_allow_html=True)
+                with m3:
+                    p_class = "profit" if total_pl >= 0 else "loss"
+                    st.markdown(f"""
+                        <div class="metric-card">
+                            <div class="metric-label">OVERALL P&L</div>
+                            <div class="metric-value {p_class}">₹{total_pl:,.2f} ({total_pl_pct:+.2f}%)</div>
+                        </div>
+                    """, unsafe_allow_html=True)
 
-            st.markdown("---")
+                st.markdown("---")
 
-            col_chart1, col_chart2 = st.columns(2)
-            with col_chart1:
-                st.subheader("Asset Allocation")
-                fig_pie = px.pie(enriched_df, values='current_value', names='symbol', hole=0.6,
-                                 color_discrete_sequence=px.colors.qualitative.Prism)
-                fig_pie.update_layout(
-                    margin={"t": 30, "b": 0, "l": 0, "r": 0},
-                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                    font={"color": "#94a3b8", "size": 12}, showlegend=True,
-                    legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1}
-                )
-                st.plotly_chart(fig_pie, use_container_width=True)
+                col_chart1, col_chart2 = st.columns(2)
+                with col_chart1:
+                    st.subheader("Asset Allocation")
+                    fig_pie = px.pie(enriched_df, values='current_value', names='symbol', hole=0.6,
+                                     color_discrete_sequence=px.colors.qualitative.Prism)
+                    fig_pie.update_layout(
+                        margin={"t": 30, "b": 0, "l": 0, "r": 0},
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        font={"color": "#94a3b8", "size": 12}, showlegend=True,
+                        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1}
+                    )
+                    st.plotly_chart(fig_pie, use_container_width=True)
 
-            with col_chart2:
-                st.subheader("Market Performance")
-                fig_bar = px.bar(enriched_df, x='symbol', y='unrealized_pl',
-                                 color='unrealized_pl',
-                                 color_continuous_scale=['#ef4444', '#10b981'],
-                                 labels={'unrealized_pl': 'P&L (₹)'})
-                fig_bar.update_layout(
-                    margin={"t": 30, "b": 0, "l": 0, "r": 0},
-                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                    font={"color": "#94a3b8"}, coloraxis_showscale=False
-                )
-                st.plotly_chart(fig_bar, use_container_width=True)
+                with col_chart2:
+                    st.subheader("Market Performance")
+                    fig_bar = px.bar(enriched_df, x='symbol', y='unrealized_pl',
+                                     color='unrealized_pl',
+                                     color_continuous_scale=['#ef4444', '#10b981'],
+                                     labels={'unrealized_pl': 'P&L (₹)'})
+                    fig_bar.update_layout(
+                        margin={"t": 30, "b": 0, "l": 0, "r": 0},
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        font={"color": "#94a3b8"}, coloraxis_showscale=False
+                    )
+                    st.plotly_chart(fig_bar, use_container_width=True)
 
-            # Holdings Table
-            st.subheader("Your Holdings")
-            if 'id' in enriched_df.columns:
-                display_df = enriched_df[['id', 'symbol', 'asset_type', 'avg_price', 'quantity',
-                                          'current_price', 'current_value', 'unrealized_pl', 'unrealized_pl_pct']].copy()
-                
-                # AMFI codes are already replaced with MF Names in enriched_df
+                # ── Holdings Table ────────────────────────────────────────────
+                st.subheader("Your Holdings")
+                if 'id' in enriched_df.columns:
+                    display_df = enriched_df[[
+                        'id', 'symbol', 'asset_type', 'avg_price', 'quantity',
+                        'current_price', 'current_value', 'unrealized_pl', 'unrealized_pl_pct'
+                    ]].copy()
 
-                display_df.columns = ['ID', 'Symbol', 'Type', 'Avg Price', 'Qty', 'LTP/NAV',
-                                       'Current Value', 'P&L', 'P&L %']
-                st.dataframe(
-                    display_df.drop(columns=['ID']).style.format({
-                        'Avg Price': '₹{:.2f}', 'Qty': '{:.2f}', 'LTP/NAV': '₹{:.2f}',
-                        'Current Value': '₹{:.2f}', 'P&L': '₹{:.2f}', 'P&L %': '{:.2f}%'
-                    }).map(
-                        lambda v: 'color: #10b981;' if isinstance(v, (int, float)) and v > 0 else 'color: #ef4444;' if isinstance(v, (int, float)) and v < 0 else '',
-                        subset=['P&L', 'P&L %']
-                    ),
-                    use_container_width=True, hide_index=True
-                )
-                with st.expander("🗑️ Delete Holding"):
-                    to_delete = st.selectbox("Select holding to remove:",
-                                              display_df['ID'].astype(str) + " - " + display_df['Symbol'])
-                    if st.button("Delete", key="del_holding_btn"):
-                        holding_id = to_delete.split(" - ")[0]
-                        db.delete_holding(holding_id)
-                        st.success("Holding deleted!")
-                        st.rerun()
-        else:
-            st.info("Your portfolio is empty. Add some assets below.")
+                    # ── NEW: Invested column ──────────────────────────────────
+                    display_df.insert(
+                        display_df.columns.get_loc('current_price'),
+                        'invested',
+                        (display_df['avg_price'] * display_df['quantity']).round(2)
+                    )
 
-        st.markdown("---")
-        render_add_holding_form()
+                    display_df.columns = [
+                        'ID', 'Symbol', 'Type', 'Avg Price', 'Qty',
+                        'Invested', 'LTP/NAV', 'Current Value', 'P&L', 'P&L %'
+                    ]
+                    st.dataframe(
+                        display_df.drop(columns=['ID']).style.format({
+                            'Avg Price':     '₹{:.2f}',
+                            'Qty':           '{:.2f}',
+                            'Invested':      '₹{:.2f}',
+                            'LTP/NAV':       '₹{:.2f}',
+                            'Current Value': '₹{:.2f}',
+                            'P&L':           '₹{:.2f}',
+                            'P&L %':         '{:.2f}%',
+                        }).map(
+                            lambda v: 'color: #10b981;' if isinstance(v, (int, float)) and v > 0
+                                      else 'color: #ef4444;' if isinstance(v, (int, float)) and v < 0
+                                      else '',
+                            subset=['P&L', 'P&L %']
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    # Delete whole holding (removes all purchases too)
+                    with st.expander("🗑️ Delete Entire Holding"):
+                        to_delete = st.selectbox(
+                            "Select holding to remove:",
+                            display_df['ID'].astype(str) + " - " + display_df['Symbol'],
+                            key="del_holding_sel"
+                        )
+                        st.caption("⚠️ This removes the holding AND all its purchase history.")
+                        if st.button("Delete", key="del_holding_btn"):
+                            holding_id = to_delete.split(" - ")[0]
+                            db.delete_holding(holding_id)
+                            st.success("Holding and all its purchases deleted!")
+                            st.rerun()
+            else:
+                st.info("Your portfolio is empty. Go to ➕ Add Holding to get started.")
+
+        with tab_past_buys:
+            _render_past_buys()
+
+        with tab_add:
+            render_add_holding_form()
+
 
 def render_add_holding_form():
     st.markdown("### ➕ Add New Holding")
-    
+    st.caption("If you already hold this stock, a new purchase is recorded and your **weighted average price** is automatically updated.")
+
     # 1. Search and Result Selection (OUTSIDE FORM for Reactivity)
     asset_type = st.selectbox("Select Asset Type", ["STOCK", "ETF", "MF"])
     search_query = st.text_input(f"🔍 Search {asset_type} (e.g. Reliance, HDFC)", key="holding_search_input")
-    
+
     selected_symbol = ""
     if search_query:
         with st.spinner("Searching..."):
@@ -354,25 +493,33 @@ def render_add_holding_form():
     else:
         st.caption("Enter name to see matches here.")
 
-    # 2. Add Details (Inside a separate form)
+    # 2. Add Details form
     if selected_symbol:
         st.info(f"Adding Details for: **{selected_symbol}**")
         with st.form("add_holding_details_form", clear_on_submit=True):
             col1, col2 = st.columns(2)
             with col1:
-                avg_price = st.number_input("Average Buy Price (₹)", min_value=0.0, value=1.0, format="%.2f", step=0.01)
+                avg_price = st.number_input("Buy Price (₹)", min_value=0.0, value=1.0, format="%.2f", step=0.01)
             with col2:
                 quantity = st.number_input("Quantity", min_value=0.0001, value=1.0, format="%.4f", step=0.0001)
-            
+
             purchase_date = st.date_input("Purchase Date", value=datetime.now())
-            
+
+            # Show preview of invested amount
+            invested_preview = avg_price * quantity
+            st.markdown(
+                f'<p style="font-size:0.85rem;color:#38bdf8;">💰 This buy = <strong>₹{invested_preview:,.2f}</strong> invested</p>',
+                unsafe_allow_html=True
+            )
+
             submitted = st.form_submit_button("Finalize: Add to Portfolio", use_container_width=True, type="primary")
             if submitted:
                 if avg_price > 0 and quantity > 0:
                     try:
                         date_str = purchase_date.strftime("%Y-%m-%d")
-                        db.add_holding(selected_symbol, asset_type, avg_price, quantity, date_str)
-                        st.success(f"Added {selected_symbol} successfully!")
+                        # Use add_purchase — handles averaging automatically
+                        db.add_purchase(selected_symbol, asset_type, avg_price, quantity, date_str)
+                        st.success(f"✅ Added {selected_symbol}! Holding updated with weighted average.")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Error adding holding: {e}")
