@@ -367,15 +367,18 @@ def render_alerts_tab():
     st.caption("Get a Telegram message when any stock hits your target price.")
 
     # ── Step 1: Telegram setup ────────────────────────────────────────────────
+    import os
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
+    
     with st.expander("⚙️ How to get your Telegram Chat ID — click to expand", expanded=True):
-        st.markdown("""
+        st.markdown(f"""
 **2 quick steps (takes ~1 minute):**
 
 **Step 1 — Start the bot:**
 👉 [Click here to open the bot on Telegram](https://t.me/Ashwik_finance_tracker_bot) → tap **Start**
 
 **Step 2 — Find your Chat ID:**
-👉 [Click here to get your Chat ID](https://api.telegram.org/bot8655805956:AAElMtpOs1Dbh-aNVPVmnNmJKwkMbvtlRik/getUpdates) → look for `"id"` inside `"from"` → copy that number
+👉 [Click here to get your Chat ID](https://api.telegram.org/bot{token}/getUpdates) → look for `"id"` inside `"from"` → copy that number
 
 Paste the number below. That's it — alerts will be sent to your Telegram. ✅
         """)
