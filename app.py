@@ -351,10 +351,17 @@ with st.sidebar:
 
     st.markdown("<hr>", unsafe_allow_html=True)
 
-    # ── Logout (top) ──────────────────────────────────
+    # ── Sidebar Actions ──────────────────────────────────
     st.markdown('<div class="logout-btn">', unsafe_allow_html=True)
     if st.button("⏻  Logout", use_container_width=True):
         st.session_state.clear()
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div style="margin-top: 10px;" class="logout-btn">', unsafe_allow_html=True)
+    if st.button("🗑️  Delete All Holdings", type="primary", use_container_width=True):
+        db.delete_all_holdings()
+        st.success("All holdings deleted.")
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 

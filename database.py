@@ -251,6 +251,27 @@ def delete_holding(holding_id: str):
     get_all_purchases.clear()
 
 
+def delete_all_holdings():
+    """
+    Delete ALL holdings and purchases for the current user.
+    """
+    user_id = get_current_user_id()
+    if not user_id:
+        return
+    database = _db()
+    if database is None:
+        return
+
+    # Delete all documents for this user
+    database.purchases.delete_many({"user_id": user_id})
+    database.holdings.delete_many({"user_id": user_id})
+
+    # Clear cached data
+    get_all_holdings.clear()
+    get_all_purchases.clear()
+
+
+
 # ── Price Alerts ─────────────────────────────────────────────────────────────────────────
 
 def add_alert(symbol: str, target_price: float, condition: str,
