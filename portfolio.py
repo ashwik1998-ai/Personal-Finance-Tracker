@@ -260,7 +260,7 @@ def _render_past_buys():
             edit_label = "✏️ Close" if is_editing else "✏️ Edit"
             if st.button(edit_label, key=f"edit_btn_{pid}", use_container_width=True):
                 st.session_state["editing_purchase_id"] = None if is_editing else pid
-                st.rerun(scope="fragment")
+                st.rerun()
 
         with info_col:
             cur_str = f"LTP ₹{cur_price:,.2f}" if cur_price > 0 else ""
@@ -282,7 +282,7 @@ def _render_past_buys():
                 db.delete_purchase(pid)
                 if st.session_state.get("editing_purchase_id") == pid:
                     st.session_state["editing_purchase_id"] = None
-                st.rerun(scope="fragment")
+                st.rerun()
 
         if is_editing:
             with st.form(f"edit_form_{pid}"):
@@ -304,7 +304,7 @@ def _render_past_buys():
                                        new_date.strftime("%Y-%m-%d"))
                     st.session_state["editing_purchase_id"] = None
                     st.success(f"Updated {row['symbol']} ✅")
-                    st.rerun(scope="fragment")
+                    st.rerun()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
